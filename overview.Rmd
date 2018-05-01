@@ -1,0 +1,719 @@
+---
+  title: "Overview"
+output: html_document
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+.libPaths(c("/home/bgui/R/x86_64-redhat-linux-gnu-library/3.4",
+            "/usr/lib64/R/library",
+            "/usr/share/R/library", 
+            "/stock/R/lib"))
+
+library(dplyr)
+library(magrittr)
+library(stringr)
+library(rvest)
+library(data.table)
+require(curl)
+library(purrr)
+require(RSelenium, lib="/stock/R/lib")
+#library(pdftools)
+#library(tm)
+library(readtext)
+
+source("Helpers_final.R")
+
+
+```
+
+# Introduction
+
+This file describe step by step how I gathered and processed data in order to assess how much a bill has been transformed by the paraliament. 
+
+To illustrate this method, I'll base this study on the 16th, the 17th and the 18th german parliaments. 
+
+# Scraping the bill proposals and the final bills
+
+There is not database gathering the text of all the bills that have been passed by the german parliaments. The pdf-files are accessible online but are not structured enough to get direct access to the links. 
+
+The archives of the bundestag proposes an index page summarizing all the text passed by the parliament during one legislature period. These page redirect to individual pages for each text. 
+
+First, I generate all the index pages and scrape all the links they content.
+
+## Generate Bills' Url for Overview
+```{r}
+#Included in the analysis : LegislaturPeriod from 8 to &!
+lp <- 8:18
+#Generate url of the indexes which will be scraped for each lp
+index_url <- paste0('http://dipbt.bundestag.de/extrakt/ba/WP', lp, '/index.html')
+
+#Scrape the links leading to an overview-page of each law
+# This might take some time
+
+#test <- index_url[2] %>% 
+#  purrr::map(~ scrape_index(.x))
+
+tmp <- list()
+for(jj in seq_along(index_url)){
+  tmp[[jj]] <- scrape_index(index_url[jj])
+}
+
+tmp <- do.call(rbind, tmp)
+
+# Each law has a unique id, which is only used for the online storing
+# Using these ids, I can generate the individual links to each bill
+
+lp <- tmp$url %>% str_extract("[[:digit:]]+")
+#Generate the individual links of the laws to scrape
+urls <- paste0("http://dipbt.bundestag.de/extrakt/ba/WP", lp, "/", tmp$tmp1 %>% unique)
+
+save(urls, file = "Data/urls_overview_pages.Rdata")
+```
+
+Once the individual links to the page sumarizing the process for each law has been generated, the links leading to the pdf file can be extracted.
+
+Two types of documents have to be downloaded: the bill proposals and the final bills. The proposals are technically easily to download, so that I'll start with them. 
+
+## Download the bill proposals
+```{r}
+load("Data/urls_overview_pages.Rdata")
+#Scraping of each law (stored in urls)
+process <- list()
+error <- c()
+pb <- txtProgressBar(min = 0, max = length(urls), style = 3)
+for(jj in seq_along(urls)){
+tryCatch({
+process[[jj]] <- extract_important_information(urls[jj])
+}, warning = function(war) {message(conditionMessage(war))
+}, error = function(e){
+message(conditionMessage(e))
+print(jj)
+error <- c(error, jj)
+}, finally ={
+setTxtProgressBar(pb, jj)
+})
+}
+
+library(data.table)
+process <- do.call(rbind, process)
+
+save(process, urls, file = "Data/general_bills_information.Rdata")
+
+tmp <- process %>% 
+filter(grepl(url, pattern = "WP14/")) %>%
+filter(drucksache_numm %>% grepl(pattern = "BT(.*)\\(Gesetzentwurf\\)")) %>% 
+filter(!duplicated(drucksache_numm))
+
+urls <- tmp$drucksache_numm %>% str_extract("BT(.*)\\(Gesetzentwurf\\)") %>% get_links
+
+filenames <- tmp$url %>% 
+str_extract("[[:digit:]]+/[[:digit:]]+/[[:digit:]]+.html") %>% 
+str_replace(".html", "") %>%
+str_replace("/[[:digit:]]+/", "")
+
+# Select only the proposals
+tmp <- process %>% 
+filter(name %>% grepl(pattern = "\\(Gesetzentwurf\\)")) %>%
+filter(!duplicated(url))
+
+# Extract the links
+urls <- c(tmp$links, urls)
+#Generate Names for the files
+filenames <- c(filenames, 
+tmp$url %>% 
+str_extract("[[:digit:]]+/[[:digit:]]+/[[:digit:]]+.html") %>% 
+str_replace(".html", "") %>%
+str_replace("/[[:digit:]]+/", ""))
+
+#Download the documents
+
+pb <- txtProgressBar(min = 0, max = length(urls), style = 3)
+for(jj in 1:length(urls)){
+download.file(urls[jj], destfile = paste0("Data/Proposal/", filenames[jj], ".pdf"), quiet = T)
+setTxtProgressBar(pb, jj)
+}
+
+```
+Now the proposal have been saved in pdf-format into the folder "Proposal". Among the 8478 Law-Making-Processes registered in the index pages, only 6785 Bills-Proposals were available. I did not check systematically, but each of the registered process which did not include a proposal was about an unpassed law. Accordingly, I am confident, that each bill which have been passed in the german parliament is included in the data.
+
+According to the official statisitcs (see https://www.bundestag.de/blob/196202/ee30d500ea94ebf8146d0ed7b12a8972/kapitel_10_01_statistik_zur_gesetzgebung-data.pdf), the following number of bills has been proposed and passed : 
+
+LP | Proposals | Obtained Proposals | Passed Bills | Obtained Bills | 
+LP12 | 800 | 799 | 493  | 490 (   1 |  3)
+LP13 | 923 | 923 | 552  | 550 (   0 |  2)
+LP14 | 864 | 926 | 549  | 543 ( -62 |  6)
+LP15 | 643 | 685 | 385  | 385 ( -42 |  0)
+LP16 | 905 | 906 | 613  | 601 (  -1 | 12)
+LP17 | 844 | 848 | 543  | 535 (  -4 |  8)
+LP18 | 731 | 735 | 548  | 545 (  -4 |  3)
+
+
+The following table present the number of bill-proposals for each lp. 
+
+```{r}
+
+tmp <- process %>% 
+filter(name %>% grepl(pattern = "\\(Gesetzentwurf\\)")) %>%
+filter(!duplicated(url))
+
+tmp1 <- process %>% 
+filter(grepl(url, pattern = "WP14/")) %>%
+filter(drucksache_numm %>% grepl(pattern = "BT(.*)\\(Gesetzentwurf\\)")) %>% 
+filter(!duplicated(drucksache_numm))
+
+tmp <- rbind(tmp, tmp1)
+
+lp <- tmp$url %>% str_extract("/WP\\d*/") %>% str_extract("[[:digit:]]+")
+
+table(paste0("LP", lp, ""))
+
+```
+
+
+I now turn to the finals bills. Unfortunately, the file are not directly accessible, since the pdf are incrusted in Iframe. To overcome this obstacle, I use RSelenium which simulate a browser and allows to automate "clicks".
+
+
+## Download the final bills
+```{r}
+#Getting the links
+tmp <- process %>% 
+filter(name %>% grepl(pattern = "Gesetz vom")) %>%
+filter(!duplicated(url))
+
+urls <- tmp$links
+
+filenames <- tmp$url %>% 
+str_extract("[[:digit:]]+/[[:digit:]]+/[[:digit:]]+.html") %>% 
+str_replace(".html", "") %>%
+str_replace("/[[:digit:]]+/", "")
+
+#Before creating the simulated browser, it is necessary to open the server
+# Sever can be opened using the following command line
+# # The server has first to be started from the CLI
+#     xvfb-run -a java -Dwebdriver.chrome.driver=/usr/local/bin/chromedriver -jar  /usr/local/bin/selenium-server-standalone-3.0.1.jar -debug
+
+remDr <- remoteDriver(browser = "chrome")
+remDr$close()
+remDr$open()
+
+linkse <- list()
+wait <- .1
+
+pb <- txtProgressBar(min = 0, max = length(urls), style = 3)
+for(jj in seq_along(urls)){ 
+if(!is.na(urls[jj])){
+if(jj %% 200 == 0){ # Close the browser each 200 and reopen it
+tryCatch({remDr$close()}, 
+error = function(e){"Server could not be closed"})
+remDr$open()
+Sys.sleep(10)
+}
+
+tryCatch({
+linkse[jj] <- extract_selenium_pdf(urls[jj], jj, wait, filenames)
+}, warning = function(war){
+}, error = function(e){cat("\nScrape was problematic")})
+cat(paste0("\n", " ",jj, " "))
+setTxtProgressBar(pb, jj)
+}
+}
+
+#The process with RSelenium produces a lot of technical errors, therefore it is necessary to recheck and do it again
+
+#Get the list of downloaded file
+tmp <- system("ls -s ./Data/Bills/", intern = T)
+
+# Select only the file which have a size bigger than 0
+size <- tmp %>% str_extract(pattern = "[[:digit:]]+") #Extract size
+name <- tmp %>% 
+str_extract(pattern = "[[:digit:]]+.pdf") %>%
+str_replace(".pdf", "") #Extract name
+checked <- name[size > 0]
+
+#Mark all downloaded urls as NA
+urls[filenames %in% checked] <- NA
+
+#Do it again but only but no downloaded urls
+k <- 1
+wait <- .5
+
+for(jj in seq_along(urls)){ #seq_along(urls)
+if(!is.na(urls[jj])){
+k <- k+1
+if(k %% 100 == 0){ # Close the browser each 200 and reopen it
+tryCatch({remDr$close()}, 
+error = function(e){"Server could not be closed"})
+remDr$open()
+Sys.sleep(10)
+}
+
+tryCatch({
+linkse[jj] <- extract_selenium_pdf(urls[jj], jj, wait, filenames)
+}, warning = function(war){
+}, error = function(e){cat("\nScrape was problematic")})
+cat(paste0("\n", " ",jj, " "))
+setTxtProgressBar(pb, jj)
+} else {cat(paste0(" ", jj, " |")) }
+}
+
+tmp <- system("ls -s ./Data/Bills/", intern = T)
+
+# Select only the file which have a size bigger than 0
+size <- tmp %>% str_extract(pattern = "[[:digit:]]+") #Extract size
+name <- tmp %>% 
+str_extract(pattern = "[[:digit:]]+.pdf") %>%
+str_replace(".pdf", "") #Extract name
+checked <- name[size > 0]
+
+#Mark all downloaded urls as NA
+urls[filenames %in% checked] <- NA
+urls <- urls[!is.na(urls)]
+
+
+save(urls, file="bills_not_online.Rdata")
+
+```
+
+Finals bills have now been downloaded and are stored in the folder "Bills". The index pages indicated 4842 bills passed in the german parliament between the 8th and 18th legislature period, but 50 links were corrupted (saved in "bills_not_online.Rdata"). Accordingly, I have been able to download the text of 4792 bills. 
+
+```{r}
+tmp <- system("ls -s ./Data/Bills/", intern = T)
+
+
+lp <- tmp %>% str_extract(pattern = "[[:digit:]]+.pdf") %>%
+str_extract(pattern = "(8|9)|(1\\d)")
+table(paste0("LP", lp))        
+
+tmp <- process %>% 
+filter(name %>% grepl(pattern = "\\(Gesetzentwurf\\)")) %>%
+filter(!duplicated(url))
+```
+
+To summarize, 8500 registered law-making process, I have found 6785 bills proposals. Not all of them passed the parliaments. Therefore only 4842 finals bills were downloaded (50 went missing)
+
+# Processing Pdfs
+
+Once the documents had been downloaded, it was necessary to process them, in order to analyze their content. Here again I'll start with the proposals
+
+##Processing Proposal
+```{r}
+
+#Trying all the LPs at once breaks the code, accordingly, each LP has to be red separately
+lp_to_read <- 13:18
+
+#Get the path to the pdf-files regarding the current lp
+docs_all <- list.files(path="Data/Proposal/", full.names = T)
+docs_all <- docs_all[grep(docs_all, pattern = ".pdf")]
+lp <- docs_all %>% str_extract("/(8|9|1\\d)") %>% str_replace("/", "")
+docs <- docs_all[lp %in% lp_to_read]
+
+#Preprocess the files: 
+# 1. Read the file (two methods are used : pdftool is simple but less efficient ; if it fails, the function tries xpdf which is more complex and more efficient)
+# 2. Extract the name of the institution, the title of the bill, the date and the authors of the bills
+# Clean headings of each page which do not relate to the content of the bill
+# 3. Identify the start and the end of the bill in order to isolate the content
+#Some pdf are not working
+problem <- c("Data/Proposal//1612060.pdf", 
+             "Data/Proposal//1589704.pdf", 
+             "Data/Proposal//13119210.pdf", 
+             "Data/Proposal//12154026.pdf", 
+             "Data/Proposal//12154324.pdf", 
+             "Data/Proposal//12155214.pdf", 
+             "Data/Proposal//11176788.pdf", 
+             "Data/Proposal//11176876.pdf", 
+             "Data/Proposal//11176944.pdf", 
+             "Data/Proposal//11177114.pdf", 
+             "Data/Proposal//11177264.pdf", 
+             "Data/Proposal//11177280.pdf", 
+             "Data/Proposal//10190168.pdf", 
+             "Data/Proposal//10190760.pdf", 
+             "Data/Proposal//10192130.pdf", 
+             "Data/Proposal//10197751.pdf", 
+             "Data/Proposal//10197760.pdf", 
+             "Data/Proposal//10197771.pdf", 
+             "Data/Proposal//9205735.pdf", 
+             "Data/Proposal//14103786.pdf", 
+             "Data/Proposal//14104949.pdf", 
+             "Data/Proposal//14108587.pdf", 
+             "Data/Proposal//14111701.pdf")
+
+tmp <- list()
+file <- c()
+for(jj in 1:length(docs)){
+  cat(paste0(jj, " | ", docs[jj], "\n"))
+  file[jj] <- docs[jj]
+  #Extract information from bills
+  if(docs[jj] %in% problem){
+    tmp[[jj]] <- "The bill was problematic (1)"
+  } else {
+    tmp[[jj]] <- preprocess(docs[jj], type = "proposal")
+  }
+}
+
+text_dt <- list()
+instit <- c()
+title <- c()
+date <- c()
+author <- c()
+for(jj in seq_along(tmp)){
+  if(length(tmp[[jj]]) == 1){
+    text_dt[[jj]] <- tmp[[jj]]
+    instit[jj] <- NA
+    title[jj] <-  NA
+    date[jj] <- NA
+    author[jj] <- NA
+  } else {
+    text_dt[[jj]] <- tmp[[jj]]$text
+    instit[jj] <- tmp[[jj]]$instit
+    title[jj] <- tmp[[jj]]$title
+    date[jj] <- tmp[[jj]]$date
+    author[jj] <- tmp[[jj]]$author
+  }
+}
+
+#Check the structure of the results and how many errors happened
+load("error_reading_proposal.Rdata")
+error[lp_to_read] <- desc_errors(text_dt)
+save(error, file="error_reading_proposal.Rdata")
+
+# Separate the errors from the successfull reading
+errors <- list()
+xx <- 1
+save <- list()
+yy <- 1
+for(jj in seq_along(text_dt)){
+  if(is.na(title[jj])){
+    errors[[xx]] <- list(text = text_dt[[jj]], file = file[jj], instit = instit[jj], title = title[jj])
+    xx <- xx + 1
+    next
+  } else {
+    save[[yy]] <- list(text = text_dt[[jj]], file = file[jj], instit = instit[jj], title = title[jj])
+    yy <- yy + 1 
+  } 
+}
+
+# Some more leaning
+# Some documents have two columns, the function split_column identify these documents and transform them in one column documents. Although it is not perfect, the tests shows an efficiency higher than 95%
+for(jj in seq_along(save)){
+  print(jj)
+  #Delete the title from the content
+  save[[jj]] <- clean_title(save[[jj]])
+  #Delete the space at the  the start of each row
+  save[[jj]] <- clean_start(save[[jj]])
+  save[[jj]]$text <- split_column(save[[jj]]$text, jj) %>% clean("multiplebreaks")
+}
+
+#Save into .txt file
+save %>% purrr::map(~{
+  .x$file %>% str_replace(".pdf", ".txt")
+})
+
+for(jj in seq_along(save)){
+  dest <- (save[[jj]]$file %>% str_replace(".pdf", ".txt"))
+  cat(save[[jj]]$text %>% clean("multiplespace"), file=dest)
+}
+
+
+
+```
+
+
+Now most of the proposals have been red and saved in a .txt format. 
+
+##Processing Bills
+
+```{r}
+#Trying all the LPs at once breaks the code, accordingly, each LP has to be red separately
+#11 10
+lp_to_read <- 10:18
+
+#Get the path to the pdf-files regarding the current lp
+docs_all <- list.files(path="Data/Bills/", full.names = T)
+docs_all <- docs_all[grep(docs_all, pattern = ".pdf")]
+lp <- docs_all %>% str_extract("/(8|9|1\\d)") %>% str_replace("/", "")
+docs <- docs_all[lp %in% lp_to_read]
+
+problem <- c()
+
+tmp <- list()
+file <- c()
+for(jj in 1:length(docs)){
+  cat(paste0(jj, " | ", docs[jj], "\n"))
+  file[jj] <- docs[jj]
+  if(docs[jj] %in% problem){
+    tmp[[jj]] <- "The bill was problematic (1)"
+  } else {
+    #Extract information from bills
+    tmp[[jj]] <- preprocess(docs[jj], type = "bill")
+  }
+}
+
+text_dt <- list()
+title <- c()
+date <- c()
+for(jj in seq_along(tmp)){
+  if(length(tmp[[jj]]) == 1){
+    text_dt[[jj]] <- tmp[[jj]]
+    title[jj] <-  NA
+    date[jj] <- NA
+  } else {
+    text_dt[[jj]] <- tmp[[jj]]$text
+    title[jj] <- tmp[[jj]]$title
+    date[jj] <- tmp[[jj]]$date
+  }
+}
+
+error <- c()
+load("error_reading_bill.Rdata")
+error[lp_to_read] <- desc_errors(text_dt)
+save(error, file="error_reading_bill.Rdata")
+
+errors <- list()
+xx <- 1
+save <- list()
+yy <- 1
+for(jj in seq_along(text_dt)){
+  if(is.na(date[jj])){
+    errors[[xx]] <- list(text = text_dt[[jj]], file = file[jj], title = title[jj])
+    xx <- xx + 1
+    next
+  } else {
+    save[[yy]] <- list(text = text_dt[[jj]], file = file[jj], title = title[jj])
+    yy <- yy + 1 
+  } 
+}
+
+for(jj in seq_along(save)){
+  print(jj)
+  #Delete the space at the  the start of each row
+  save[[jj]] <- clean_start(save[[jj]])
+  save[[jj]]$text <- split_column(save[[jj]]$text, jj) %>% clean("multiplebreaks")
+}
+
+for(jj in seq_along(save)){
+  dest <- (save[[jj]]$file %>% str_replace(".pdf", ".txt"))
+  cat(save[[jj]]$text %>% clean("multiplespace"), file=dest)
+}
+
+
+
+
+```
+
+
+# Comparison 
+```{r}
+names_bills <- list.files(path="Data/Bills/", full.names=T) %>% .[grep(., pattern = ".txt")]
+names_proposal <- list.files(path="Data/Proposal/", full.names=T) %>% .[grep(., pattern = ".txt")]
+
+names_proposal %<>% str_replace("Proposal", "Bills")
+
+names_bills <- names_bills[names_bills %in% names_proposal]
+names_proposal <- names_proposal[names_proposal %in% names_bills]
+names_proposal %<>% str_replace("Bills", "Proposal")
+
+load("comparison_results.Rdata")
+
+jj <- sample(seq_along(names_proposal), 1)
+
+sizelimit <- 50000
+lengthlimit <- 500000
+n <- 100
+
+for(jj in 1:length(names_proposal)){
+  if(!is.na(value[jj])){next}
+  start <- Sys.time()
+  cat(paste0("\n", jj," | ",names_proposal[jj]))
+  bills <- names_proposal[jj] %>% str_replace("Proposal", "Bills")
+  text1 <- reprocess(readtext(file = names_proposal[jj])[,2])
+  text2 <- reprocess(readtext(file = bills)[,2])
+  
+  length1 <- text1 %>% str_length %>% sum
+  cat(paste0("\nLength of proposal: ", length1))
+  length2 <- text2 %>% str_length %>% sum
+  cat(paste0("\nLength of bill: ", length2))
+  
+  if((length1 + length2)> sizelimit){next}
+  
+  tmp1 <- prepare_comparison(text1)
+  tmp2 <- prepare_comparison(text2)
+  
+  tmp[[jj]] <- check_similarity(tmp1$text, tmp2$text, n = 100, limit = lengthlimit)
+  if(length(tmp[[jj]]) == 1){next}
+  tmp[[jj]]$id <- names_proposal[jj]
+  tmp[jj]$value <- compute_change(tmp[[jj]]$text2)
+  time <- difftime(Sys.time(), start, units = "secs") %>% as.numeric %>% round(2)
+  cat("\nComparison took ", time, " seconds.\n")
+  
+  cat(paste0("Value : ", value[jj], "\n\n"))
+}
+
+save(value, tmp, file="comparison_results.Rdata")
+
+```
+# Merging
+
+```{r}
+Count <- c(549, 385, 613, 543, 548,
+                  543, 385, 601, 535, 545)
+Type <- c(  rep("Official", 5),
+            rep("Downloaded", 5)
+          )
+
+LP <- c(14, 15, 16, 17, 18,
+          14, 15, 16, 17, 18)
+
+library(ggplot2)
+
+dt <- tibble(Count, Type, LP)
+
+dt %>%
+  ggplot(aes(x = LP, weight = Count, group = Type, fill = Type)) + geom_bar(position = "dodge")
+```
+
+
+```{r}
+load("Data/general_bills_information.Rdata")
+load("comparison_results.Rdata")
+load("Data/wholeinformation.Rdata")
+
+names_bills <- list.files(path="Data/Bills/", full.names=T) %>% .[grep(., pattern = ".txt")]
+names_proposal <- list.files(path="Data/Proposal/", full.names=T) %>% .[grep(., pattern = ".txt")]
+
+names_proposal %<>% str_replace("Proposal", "Bills")
+
+names_bills <- names_bills[names_bills %in% names_proposal]
+names_proposal <- names_proposal[names_proposal %in% names_bills]
+
+names_proposal %<>% str_replace("Bills", "Proposal")
+
+
+dt <- process %>%
+  mutate(id = url %>% str_extract("\\d+/\\d+/\\d+") %>% str_replace("/\\d+/", ""))
+names <- names_proposal %>% str_extract("\\d+")
+dt %<>% 
+  filter(!duplicated(url)) %>%
+  filter(id %in% names)
+
+dt %<>% mutate(lp = url %>% 
+                str_extract("WP\\d+/") %>%
+                str_extract("\\d+")
+              )
+
+dt %>% group_by(lp) %>% summarize(n())
+
+ratio_del <- c()
+ratio_ins <- c()
+for(jj in seq_along(tmp)){
+  length1 <- tmp[[jj]]$text1 %>% str_length
+  length2 <- tmp[[jj]]$text2 %>% str_length
+  prop1 <-   tmp[[jj]]$text1 %>%
+                str_extract_all("\\.{4,}") %>% 
+                unlist %>% 
+                paste0(collapse = "") %>% 
+                str_length
+  prop2 <-   tmp[[jj]]$text2 %>%
+                str_extract_all("\\.{4,}") %>% 
+                unlist %>% 
+                paste0(collapse = "") %>% 
+                str_length
+  ratio_del[jj] <- 1 - (prop1/length1)
+  ratio_ins[jj] <- 1 - (prop2/length2)
+  
+}
+
+dt1 <- tibble(id = names, del = ratio_del[1:2078], ins = ratio_ins[1:2078])
+
+data <- dt %>% left_join(dt1, by = "id")
+data$del[data$lp == "14"] <- 1- data$del[data$lp == "14"]
+data$ins[data$lp == "14"] <- 1- data$ins[data$lp == "14"]
+
+data %<>% mutate(total = del + ins) %>%
+  mutate(total = total /2)
+
+init1 <- ifelse(data$initiative == "Bundesregierung", "Government", 
+               ifelse(grepl(pattern = "Fraktion", data$initiative), "Parliament", "State"))
+
+data %<>%
+  mutate(init = init1)
+
+data %>%
+  ggplot(aes(x = total)) + geom_density()
+
+data %>% 
+  ggplot(aes(x = del, y = ins)) + geom_point()
+
+data %>%
+  filter(lp != "13") %>%
+  ggplot(aes(x = lp, y = total)) + geom_boxplot()
+
+data %>%
+  ggplot(aes(x = init, y = total)) + geom_jitter()
+
+dt <- process %>%
+  filter(url %in% data$url) %>%
+  mutate(date = name %>% str_extract("\\d+.\\d+.\\d{4}")) %>%
+  filter(!is.na(date)) %>%
+  mutate(date = date %>% as.Date(format = "%d.%m.%Y"))
+
+low <- dt$date[1]
+up <- dt$date[1]
+dt$diff <- NA
+dt$up <- NA
+
+for(jj in 2:length(dt$url)){
+  #print(jj)
+  if(dt$url[jj] == dt$url[jj-1]){
+    if(dt$date[jj] < low){low <- dt$date[jj]}
+    if(dt$date[jj] > up){up <- dt$date[jj]}
+  #sort_crit[jj] <- ifelse(dt$date[jj])
+  
+  } else {
+    dt$diff[jj-1] <- difftime(low,up) %>% str_extract("\\d+")
+    print(dt$diff[jj-1])
+    #dt$low[jj-1] <- low
+    #dt$up[jj-1] <- up
+    low <- dt$date[jj]
+    up <- dt$date[jj]
+  }
+}
+
+dt1 <- dt %>% filter(!diff == "NA")
+
+data1 <- data %>% right_join(dt1, by = "url")
+
+data1 %>% 
+  mutate(diff = diff %>% as.numeric) %>%
+  ggplot(aes(x = diff, y = total)) + geom_violin() + xlim(c(0,1000))
+
+dt5 <- process %>% filter(name %>% grepl(pattern = "Vermittlung"))
+
+data1 %>%
+  mutate(vermittlung = ifelse(url %in% dt5$url, "Contested", "Not Contested")) %>% 
+  ggplot(aes(x = vermittlung, y = total)) + geom_boxplot()
+
+data1 %<>%
+  mutate(diff = diff %>% as.numeric)
+  
+data2 <- data %>% right_join(gesetze, by = "url")
+
+data2 %>%
+  ggplot(aes(x = Major, y = total)) + geom_jitter()
+
+data1 %>%
+  mutate(vermittlung = ifelse(url %in% dt5$url, "Contested", "Not Contested")) %>% 
+  mutate(diff = diff %>% as.numeric) %>%
+  ggplot(aes(x = diff, y = vermittlung)) + geom_jitter()
+
+
+test <- read.table("cap_daten.csv", header = T, row.names = F)
+
+
+
+
+load("../Topic-ClassifyeR/")
+
+```
+

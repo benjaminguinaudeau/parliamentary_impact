@@ -159,8 +159,6 @@ split_page <- function(text){
   return(tmp)
 }
 
-preprocess(docs[jj], type = "proposal")
-
 preprocess <- function(doc, method = "pdftool", type="bill"){
   
   text <- c()  
@@ -581,8 +579,6 @@ prepare_comparison <- function(text){
 # check_time <- function(start, timelimit){
 #   return(difftime(Sys.time(), start) %>% as.numeric() > timelimit)
 # }
-
-check_similarity(tmp1$text, tmp2$text, n = 100, limit = lengthlimit)
 
 
 

@@ -133,17 +133,6 @@ process_steps <-  process %>%
 df %<>% left_join(process_steps, by = "id")
 #rm(process_steps, process)
 
-
-extract_links_proposal <- function(x){
-  outp <- x %>% 
-    filter(name %>% grepl(pattern = "\\(Gesetzentwurf\\)")) %>%
-    slice(1) %>%
-    select(links) %>%
-    as.character()
-  
-  return(outp)
-}
-
 #Extract the links of the proposal
 df %<>%
   mutate(links_proposal1 = process_steps %>% map_chr(extract_links_proposal)) %>%
@@ -161,12 +150,6 @@ df %<>%
 
 
 #Downloading Proposals
-downl <- function(x, type = "Proposal"){
-  filename <- paste0("Data/",type, "/", x$id , ".pdf")
-  download.file(x$links_proposal, destfile = filename, quiet = T)
-  cat("T ")
-}
-
 df %>%
   filter(links_proposal != "character(0)") %>%
   split(.$id) %>%
@@ -208,28 +191,11 @@ I now turn to the finals bills. Unfortunately, the file are not directly accessi
 
 ## Download the final bills
 ```{r}
-#Getting the links
-
-
-extract_links_bill <- function(x){
-  outp <- x %>% 
-    filter(name %>% grepl(pattern = "Gesetz vom")) %>%
-    slice(1) %>%
-    select(links) %>%
-    as.character()
-  
-  return(outp)
-}
-
 #Extract the links of the bills
 df %<>%
   mutate(links_bill = process_steps %>% map_chr(extract_links_bill), 
          filenames_bill = id)
  
-
-  
-   
-
 ```
 
 
@@ -271,7 +237,7 @@ for(jj in seq_along(urls)){
 #The process with RSelenium produces a lot of technical errors, therefore it is necessary to recheck and do it again
 
 #Get the list of downloaded file
-files <- data.frame(inf = system("ls -s ./Data/Proposal/", intern = T)) %>%
+files <- data.frame(inf = system("ls -s ./Data/Bills/", intern = T)) %>%
             slice(-1) %>%
             mutate(size = inf %>% str_extract(pattern = "[[:digit:]]+"),
                    name = inf %>% 
@@ -307,6 +273,8 @@ for(jj in seq_along(urls)){ #seq_along(urls)
     } else {cat(paste0(" ", jj, " |")) }
 }
 
+
+
 tmp <- system("ls -s ./Data/Bills/", intern = T)
 
 # Select only the file which have a size bigger than 0
@@ -328,16 +296,31 @@ save(urls, file="bills_not_online.Rdata")
 Finals bills have now been downloaded and are stored in the folder "Bills". The index pages indicated 4842 bills passed in the german parliament between the 8th and 18th legislature period, but 50 links were corrupted (saved in "bills_not_online.Rdata"). Accordingly, I have been able to download the text of 4792 bills. 
 
 ```{r}
-tmp <- system("ls -s ./Data/Bills/", intern = T)
+
+df %>% 
+  filter(links_bill != "character(0)" & !is.na(links_bill)) %>%
+  mutate(lptmp = paste0("LP", lp)) %>%
+  select(lptmp) %>%
+  table
+
+checking <- tibble(files = list.files(path="Data/", full.names = T, recursive = T)) %>%
+  filter(files %>% grepl(pattern = ".pdf")) %>%
+  mutate(type = ifelse(
+                    files %>% grepl(pattern = "Proposal"), 
+                    "Proposal_pdf", 
+                    "Bill_pdf"),
+         id = files %>% str_extract("[[:digit:]]+"), 
+         included = T) %>%
+  select(-files) %>%
+  spread(key = "type", value = "included")
+  
+#Select only the bills where the two documents have been downloaded
+df %<>% left_join(checking, by = "id") %>%
+  filter(Proposal_pdf == T & Bill_pdf == T)
+
+save(df, file = "Data/3general_bills_information_downloaded.Rdata")
 
 
-lp <- tmp %>% str_extract(pattern = "[[:digit:]]+.pdf") %>%
-str_extract(pattern = "(8|9)|(1\\d)")
-table(paste0("LP", lp))        
-
-tmp <- process %>% 
-filter(name %>% grepl(pattern = "\\(Gesetzentwurf\\)")) %>%
-filter(!duplicated(url))
 ```
 
 To summarize, 8500 registered law-making process, I have found 6785 bills proposals. Not all of them passed the parliaments. Therefore only 4842 finals bills were downloaded (50 went missing)
@@ -348,15 +331,19 @@ Once the documents had been downloaded, it was necessary to process them, in ord
 
 ##Processing Proposal
 ```{r}
+load(file = "Data/3general_bills_information_downloaded.Rdata")
+
 
 #Trying all the LPs at once breaks the code, accordingly, each LP has to be red separately
 lp_to_read <- 13:18
 
 #Get the path to the pdf-files regarding the current lp
-docs_all <- list.files(path="Data/Proposal/", full.names = T)
-docs_all <- docs_all[grep(docs_all, pattern = ".pdf")]
-lp <- docs_all %>% str_extract("/(8|9|1\\d)") %>% str_replace("/", "")
-docs <- docs_all[lp %in% lp_to_read]
+docs <- df %>%
+          filter(lp %in% lp_to_read) %>%
+          select(id) %>%
+          mutate(file_proposal = paste0("Data/Proposal//", id, ".pdf")) %>%
+  select(file_proposal, id)
+
 
 #Preprocess the files: 
 # 1. Read the file (two methods are used : pdftool is simple but less efficient ; if it fails, the function tries xpdf which is more complex and more efficient)
@@ -364,29 +351,21 @@ docs <- docs_all[lp %in% lp_to_read]
 # Clean headings of each page which do not relate to the content of the bill
 # 3. Identify the start and the end of the bill in order to isolate the content
 #Some pdf are not working
-problem <- c("Data/Proposal//1612060.pdf", 
-             "Data/Proposal//1589704.pdf", 
-             "Data/Proposal//13119210.pdf", 
-             "Data/Proposal//12154026.pdf", 
-             "Data/Proposal//12154324.pdf", 
-             "Data/Proposal//12155214.pdf", 
-             "Data/Proposal//11176788.pdf", 
-             "Data/Proposal//11176876.pdf", 
-             "Data/Proposal//11176944.pdf", 
-             "Data/Proposal//11177114.pdf", 
-             "Data/Proposal//11177264.pdf", 
-             "Data/Proposal//11177280.pdf", 
-             "Data/Proposal//10190168.pdf", 
-             "Data/Proposal//10190760.pdf", 
-             "Data/Proposal//10192130.pdf", 
-             "Data/Proposal//10197751.pdf", 
-             "Data/Proposal//10197760.pdf", 
-             "Data/Proposal//10197771.pdf", 
-             "Data/Proposal//9205735.pdf", 
-             "Data/Proposal//14103786.pdf", 
-             "Data/Proposal//14104949.pdf", 
-             "Data/Proposal//14108587.pdf", 
-             "Data/Proposal//14111701.pdf")
+problem <- c("1612060", "1589704", "13119210", 
+             "12154026", "12154324", "12155214", 
+             "11176788", "11176876", "11176944", 
+             "11177114", "11177264", "11177280", 
+             "10190168", "10190760", "10192130", 
+             "10197751", "10197760", "10197771", 
+             "9205735", "14103786", "14104949", 
+             "14108587", "14111701")
+
+
+test <- docs %>% 
+  mutate(text = ifelse(id %in% problem, 
+                       list("The bill was problematic (1)"),
+                       preprocess(file_proposal)))
+
 
 tmp <- list()
 file <- c()

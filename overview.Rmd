@@ -22,6 +22,7 @@ require(RSelenium, lib="/stock/R/lib")
 #library(pdftools)
 #library(tm)
 library(readtext)
+library(tidyr)
 
 source("Helpers_final.R")
 
@@ -45,7 +46,7 @@ First, I generate all the index pages and scrape all the links they content.
 ## Generate Bills' Url for Overview
 ```{r}
 #Included in the analysis : LegislaturPeriod from 8 to &!
-lp <- 8:18
+lp <- 13:18
 #Generate url of the indexes which will be scraped for each lp
 index_url <- paste0('http://dipbt.bundestag.de/extrakt/ba/WP', lp, '/index.html')
 
@@ -69,7 +70,7 @@ lp <- tmp$url %>% str_extract("[[:digit:]]+")
 #Generate the individual links of the laws to scrape
 urls <- paste0("http://dipbt.bundestag.de/extrakt/ba/WP", lp, "/", tmp$tmp1 %>% unique)
 
-save(urls, file = "Data/urls_overview_pages.Rdata")
+save(urls, file = "Data/1urls_overview_pages.Rdata")
 ```
 
 Once the individual links to the page sumarizing the process for each law has been generated, the links leading to the pdf file can be extracted.
@@ -78,7 +79,7 @@ Two types of documents have to be downloaded: the bill proposals and the final b
 
 ## Download the bill proposals
 ```{r}
-load("Data/urls_overview_pages.Rdata")
+load("Data/1urls_overview_pages.Rdata")
 #Scraping of each law (stored in urls)
 process <- list()
 error <- c()
@@ -99,43 +100,82 @@ setTxtProgressBar(pb, jj)
 library(data.table)
 process <- do.call(rbind, process)
 
-save(process, urls, file = "Data/general_bills_information.Rdata")
+save(process, urls, file = "Data/2general_bills_information.Rdata")
 
-tmp <- process %>% 
-filter(grepl(url, pattern = "WP14/")) %>%
-filter(drucksache_numm %>% grepl(pattern = "BT(.*)\\(Gesetzentwurf\\)")) %>% 
-filter(!duplicated(drucksache_numm))
+#load("Data/2general_bills_information.Rdata")
 
-urls <- tmp$drucksache_numm %>% str_extract("BT(.*)\\(Gesetzentwurf\\)") %>% get_links
+process %<>% mutate(id = url %>% 
+                 str_extract("[[:digit:]]+/[[:digit:]]+/[[:digit:]]+.html") %>%
+                 str_replace(".html", "") %>%
+                 str_replace("/[[:digit:]]+/", "")
+                 )
 
-filenames <- tmp$url %>% 
-str_extract("[[:digit:]]+/[[:digit:]]+/[[:digit:]]+.html") %>% 
-str_replace(".html", "") %>%
-str_replace("/[[:digit:]]+/", "")
+#Extract Bills-Level Information
+df <- process %>%
+        select(id, url, initiative, stand, 
+               gesta, inkrafttreten, process, 
+               drucksache_numm) %>%
+        rename(whole_description = process,
+               drucksachen = drucksache_numm
+               ) %>%
+        mutate(lp = url %>% 
+                str_extract("WP[[:digit:]]+") %>%
+                str_replace("WP", "")
+              ) %>%
+        unique
 
-# Select only the proposals
-tmp <- process %>% 
-filter(name %>% grepl(pattern = "\\(Gesetzentwurf\\)")) %>%
-filter(!duplicated(url))
+#Extract process steps_level information
+process_steps <-  process %>%
+              group_by(id) %>%
+              select(id, name, links) %>%
+              nest(-id, .key = "process_steps")
 
-# Extract the links
-urls <- c(tmp$links, urls)
-#Generate Names for the files
-filenames <- c(filenames, 
-tmp$url %>% 
-str_extract("[[:digit:]]+/[[:digit:]]+/[[:digit:]]+.html") %>% 
-str_replace(".html", "") %>%
-str_replace("/[[:digit:]]+/", ""))
+df %<>% left_join(process_steps, by = "id")
+#rm(process_steps, process)
 
-#Download the documents
 
-pb <- txtProgressBar(min = 0, max = length(urls), style = 3)
-for(jj in 1:length(urls)){
-download.file(urls[jj], destfile = paste0("Data/Proposal/", filenames[jj], ".pdf"), quiet = T)
-setTxtProgressBar(pb, jj)
+extract_links_proposal <- function(x){
+  outp <- x %>% 
+    filter(name %>% grepl(pattern = "\\(Gesetzentwurf\\)")) %>%
+    slice(1) %>%
+    select(links) %>%
+    as.character()
+  
+  return(outp)
 }
 
+#Extract the links of the proposal
+df %<>%
+  mutate(links_proposal1 = process_steps %>% map_chr(extract_links_proposal)) %>%
+  mutate(links_proposal = ifelse(lp != "14",
+                                 links_proposal1,
+                                 ifelse(
+                                    drucksachen %>%
+                                        grepl(pattern = "BT(.*)\\(Gesetzentwurf\\)"),
+                                    drucksachen %>% 
+                                     str_extract("BT(.*)\\(Gesetzentwurf\\)") %>% 
+                                     get_links,
+                                    NA)
+                                  )) %>%
+  select(-links_proposal1)
+
+
+#Downloading Proposals
+downl <- function(x, type = "Proposal"){
+  filename <- paste0("Data/",type, "/", x$id , ".pdf")
+  download.file(x$links_proposal, destfile = filename, quiet = T)
+  cat("T ")
+}
+
+df %>%
+  filter(links_proposal != "character(0)") %>%
+  split(.$id) %>%
+  map(~ downl(x = .x, type = "Proposal"))
+
+
+
 ```
+
 Now the proposal have been saved in pdf-format into the folder "Proposal". Among the 8478 Law-Making-Processes registered in the index pages, only 6785 Bills-Proposals were available. I did not check systematically, but each of the registered process which did not include a proposal was about an unpassed law. Accordingly, I am confident, that each bill which have been passed in the german parliament is included in the data.
 
 According to the official statisitcs (see https://www.bundestag.de/blob/196202/ee30d500ea94ebf8146d0ed7b12a8972/kapitel_10_01_statistik_zur_gesetzgebung-data.pdf), the following number of bills has been proposed and passed : 
@@ -154,20 +194,11 @@ The following table present the number of bill-proposals for each lp.
 
 ```{r}
 
-tmp <- process %>% 
-filter(name %>% grepl(pattern = "\\(Gesetzentwurf\\)")) %>%
-filter(!duplicated(url))
-
-tmp1 <- process %>% 
-filter(grepl(url, pattern = "WP14/")) %>%
-filter(drucksache_numm %>% grepl(pattern = "BT(.*)\\(Gesetzentwurf\\)")) %>% 
-filter(!duplicated(drucksache_numm))
-
-tmp <- rbind(tmp, tmp1)
-
-lp <- tmp$url %>% str_extract("/WP\\d*/") %>% str_extract("[[:digit:]]+")
-
-table(paste0("LP", lp, ""))
+df %>% 
+  filter(links_proposal != "character(0)") %>%
+  mutate(lptmp = paste0("LP", lp)) %>%
+  select(lptmp) %>%
+  table
 
 ```
 
@@ -178,84 +209,102 @@ I now turn to the finals bills. Unfortunately, the file are not directly accessi
 ## Download the final bills
 ```{r}
 #Getting the links
-tmp <- process %>% 
-filter(name %>% grepl(pattern = "Gesetz vom")) %>%
-filter(!duplicated(url))
 
-urls <- tmp$links
 
-filenames <- tmp$url %>% 
-str_extract("[[:digit:]]+/[[:digit:]]+/[[:digit:]]+.html") %>% 
-str_replace(".html", "") %>%
-str_replace("/[[:digit:]]+/", "")
+extract_links_bill <- function(x){
+  outp <- x %>% 
+    filter(name %>% grepl(pattern = "Gesetz vom")) %>%
+    slice(1) %>%
+    select(links) %>%
+    as.character()
+  
+  return(outp)
+}
+
+#Extract the links of the bills
+df %<>%
+  mutate(links_bill = process_steps %>% map_chr(extract_links_bill), 
+         filenames_bill = id)
+ 
+
+  
+   
+
+```
+
+
+```{r}
+
 
 #Before creating the simulated browser, it is necessary to open the server
 # Sever can be opened using the following command line
 # # The server has first to be started from the CLI
-#     xvfb-run -a java -Dwebdriver.chrome.driver=/usr/local/bin/chromedriver -jar  /usr/local/bin/selenium-server-standalone-3.0.1.jar -debug
+#xvfb-run -a java -Dwebdriver.chrome.driver=/usr/local/bin/chromedriver -jar  /usr/local/bin/selenium-server-standalone-3.0.1.jar -debug
 
 remDr <- remoteDriver(browser = "chrome")
-remDr$close()
-remDr$open()
-
+#remDr$close()
+#remDr$open()
 linkse <- list()
 wait <- .1
+urls <- df$links_bill
+filename <- df$filenames_bill
 
 pb <- txtProgressBar(min = 0, max = length(urls), style = 3)
 for(jj in seq_along(urls)){ 
-if(!is.na(urls[jj])){
-if(jj %% 200 == 0){ # Close the browser each 200 and reopen it
-tryCatch({remDr$close()}, 
-error = function(e){"Server could not be closed"})
-remDr$open()
-Sys.sleep(10)
-}
-
-tryCatch({
-linkse[jj] <- extract_selenium_pdf(urls[jj], jj, wait, filenames)
-}, warning = function(war){
-}, error = function(e){cat("\nScrape was problematic")})
-cat(paste0("\n", " ",jj, " "))
-setTxtProgressBar(pb, jj)
-}
+    if(!is.na(urls[jj])){
+      if(jj %% 200 == 0){ # Close the browser each 200 and reopen it
+          tryCatch({remDr$close()}, 
+            error = function(e){"Server could not be closed"})
+          remDr$open()
+          Sys.sleep(10)
+          }
+      
+      tryCatch({
+          linkse[jj] <- extract_selenium_pdf(urls[jj], jj, wait, filenames)
+        }, warning = function(war){
+        }, error = function(e){cat("\nScrape was problematic")})
+          cat(paste0("\n", " ",jj, " "))
+          setTxtProgressBar(pb, jj)
+    }
 }
 
 #The process with RSelenium produces a lot of technical errors, therefore it is necessary to recheck and do it again
 
 #Get the list of downloaded file
-tmp <- system("ls -s ./Data/Bills/", intern = T)
+files <- data.frame(inf = system("ls -s ./Data/Proposal/", intern = T)) %>%
+            slice(-1) %>%
+            mutate(size = inf %>% str_extract(pattern = "[[:digit:]]+"),
+                   name = inf %>% 
+                        str_extract(pattern = "[[:digit:]]+.pdf") %>%
+                        str_replace(".pdf", "")) %>%
+            filter(size != "0")
 
-# Select only the file which have a size bigger than 0
-size <- tmp %>% str_extract(pattern = "[[:digit:]]+") #Extract size
-name <- tmp %>% 
-str_extract(pattern = "[[:digit:]]+.pdf") %>%
-str_replace(".pdf", "") #Extract name
-checked <- name[size > 0]
-
-#Mark all downloaded urls as NA
-urls[filenames %in% checked] <- NA
 
 #Do it again but only but no downloaded urls
 k <- 1
 wait <- .5
 
 for(jj in seq_along(urls)){ #seq_along(urls)
-if(!is.na(urls[jj])){
-k <- k+1
-if(k %% 100 == 0){ # Close the browser each 200 and reopen it
-tryCatch({remDr$close()}, 
-error = function(e){"Server could not be closed"})
-remDr$open()
-Sys.sleep(10)
-}
-
-tryCatch({
-linkse[jj] <- extract_selenium_pdf(urls[jj], jj, wait, filenames)
-}, warning = function(war){
-}, error = function(e){cat("\nScrape was problematic")})
-cat(paste0("\n", " ",jj, " "))
-setTxtProgressBar(pb, jj)
-} else {cat(paste0(" ", jj, " |")) }
+    if(filenames[jj] %in% files$name){next}
+    if(!is.na(urls[jj])){
+        k <- k+1
+        if(k %% 100 == 0){ # Close the browser each 200 and reopen it
+          tryCatch({
+              remDr$close()
+            }, error = function(e){"Server could not be closed"
+              })
+          remDr$open()
+          Sys.sleep(10)
+        }
+        
+        tryCatch({
+            linkse[jj] <- extract_selenium_pdf(urls[jj], jj, wait, filenames)
+          }, warning = function(war){
+          }, error = function(e){cat("\nScrape was problematic")
+            })
+        cat(paste0("\n", " ",jj, " "))
+        setTxtProgressBar(pb, jj)
+    } else {cat(paste0(" ", jj, " |")) }
 }
 
 tmp <- system("ls -s ./Data/Bills/", intern = T)
